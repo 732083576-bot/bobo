@@ -1,20 +1,26 @@
 import json
 import time
 import logging
+import os
+import base64
 from typing import Dict, Any
+from datetime import datetime
 from his_client import HISClient
-from pax_client import PAXClient
+from hrv_client import HRVClient
 
 
 class Middleware:
     def __init__(self, config_path: str = 'config.json'):
         self.config = self._load_config(config_path)
         self._setup_logging()
+        self._setup_report_path()
         self.his_client = HISClient(self.config.get('his', {}))
-        self.pax_client = PAXClient(self.config.get('pax', {}))
+        self.hrv_client = HRVClient(self.config.get('hrv', {}))
         self.max_retries = self.config.get('sync', {}).get('max_retries', 3)
         self.retry_delay = self.config.get('sync', {}).get('retry_delay', 5)
         self.interval = self.config.get('sync', {}).get('interval_seconds', 60)
+        self.report_save_path = self.config.get('sync', {}).get('report_save_path', './reports')
+        self.report_format = self.config.get('sync', {}).get('report_format', 'PDF')
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         try:
@@ -33,11 +39,16 @@ class Middleware:
             level=log_level,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(log_file),
+                logging.FileHandler(log_file, encoding='utf-8'),
                 logging.StreamHandler()
             ]
         )
         self.logger = logging.getLogger(__name__)
+
+    def _setup_report_path(self):
+        if not os.path.exists(self.report_save_path):
+            os.makedirs(self.report_save_path)
+            self.logger.info(f"创建报告保存目录: {self.report_save_path}")
 
     def _retry_on_failure(self, func, *args, **kwargs):
         for attempt in range(self.max_retries):
@@ -51,56 +62,118 @@ class Middleware:
                     time.sleep(self.retry_delay)
         return None
 
-    def sync_data(self, data_type: str = 'exams'):
-        self.logger.info(f"开始同步 {data_type} 数据...")
-        
-        his_data = self._retry_on_failure(self.his_client.fetch_data, data_type)
-        if not his_data:
-            self.logger.error(f"从 HIS 系统获取 {data_type} 数据失败")
-            return False
-        
-        self.logger.info(f"从 HIS 成功获取数据: {his_data}")
-        
-        success = self._process_and_send(his_data, data_type)
-        
-        if success:
-            self.logger.info(f"{data_type} 数据同步完成")
-        else:
-            self.logger.error(f"{data_type} 数据同步失败")
-        
-        return success
-
-    def _process_and_send(self, data: Dict[str, Any], data_type: str) -> bool:
-        items = data.get('items', [data]) if isinstance(data, dict) else data
-        
-        all_success = True
-        table_map = {
-            'patients': 'Patients',
-            'exams': 'Exams'
+    def convert_his_patient_to_hrv(self, his_patient: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            'caseNo': his_patient.get('caseNo', his_patient.get('身份证号', '')),
+            '姓名': his_patient.get('姓名', his_patient.get('name', '')),
+            '性别': his_patient.get('性别', his_patient.get('gender', '')),
+            '出生日期': his_patient.get('出生日期', his_patient.get('birthDate', '')),
+            '身高': his_patient.get('身高', his_patient.get('height', 0)),
+            '体重': his_patient.get('体重', his_patient.get('weight', 0)),
+            '运动等级': his_patient.get('运动等级', his_patient.get('sportLevel', 1))
         }
-        table_name = table_map.get(data_type, data_type)
+
+    def sync_patients_to_hrv(self) -> bool:
+        self.logger.info("开始同步患者到HRV系统...")
+        
+        his_patients = self._retry_on_failure(self.his_client.get_patients_from_db)
+        if not his_patients:
+            self.logger.warning("未从HIS获取到患者数据")
+            return True
+        
+        patients = his_patients.get('items', [his_patients]) if isinstance(his_patients, dict) else his_patients
+        success_count = 0
+        
+        for patient in patients:
+            hrv_patient = self.convert_his_patient_to_hrv(patient)
+            if not hrv_patient.get('caseNo'):
+                self.logger.warning(f"患者缺少caseNo，跳过: {patient}")
+                continue
+            
+            result = self._retry_on_failure(self.hrv_client.create_patient, hrv_patient)
+            if result:
+                self.logger.info(f"成功同步患者到HRV: {hrv_patient.get('caseNo')}")
+                success_count += 1
+            else:
+                self.logger.error(f"同步患者到HRV失败: {hrv_patient.get('caseNo')}")
+        
+        self.logger.info(f"患者同步完成，成功: {success_count}/{len(patients)}")
+        return True
+
+    def fetch_and_save_hrv_results(self) -> bool:
+        self.logger.info("开始获取HRV检测结果...")
+        
+        records = self._retry_on_failure(self.hrv_client.get_measurement_record_list)
+        if not records:
+            self.logger.warning("未获取到HRV检测记录")
+            return True
+        
+        self.logger.info(f"获取到HRV检测记录: {records}")
+        
+        items = records.get('items', [records]) if isinstance(records, dict) else records
+        success_count = 0
         
         for item in items:
-            result = self._retry_on_failure(self.pax_client.send_data, item, data_type)
-            if result:
-                self.logger.info(f"成功发送数据到 PAX: {result}")
-                if self.his_client.use_database and 'ID' in item:
-                    self.his_client.mark_as_synced(table_name, item['ID'])
-            else:
-                self.logger.error(f"发送数据到 PAX 失败: {item}")
-                all_success = False
+            case_no = item.get('caseNo')
+            if not case_no:
+                continue
+            
+            parameters = self._retry_on_failure(self.hrv_client.get_measurement_parameters, case_no)
+            if parameters:
+                self.logger.info(f"获取到检测结果: {case_no}")
+                self._save_parameters(case_no, parameters)
+            
+            report_bytes = self._retry_on_failure(self.hrv_client.get_report_bytes, case_no, self.report_format)
+            if report_bytes:
+                self.logger.info(f"获取到报告: {case_no}")
+                self._save_report(case_no, report_bytes)
+                success_count += 1
         
-        return all_success
+        self.logger.info(f"检测结果获取完成，成功: {success_count}")
+        return True
+
+    def _save_parameters(self, case_no: str, parameters: Dict[str, Any]):
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            file_path = os.path.join(self.report_save_path, f"{case_no}_{timestamp}_parameters.json")
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(parameters, f, ensure_ascii=False, indent=2)
+            self.logger.info(f"检测参数已保存: {file_path}")
+        except Exception as e:
+            self.logger.error(f"保存检测参数失败: {e}")
+
+    def _save_report(self, case_no: str, report_bytes: bytes):
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            ext = self.report_format.lower()
+            if ext == 'jpg':
+                ext = 'zip'
+            file_path = os.path.join(self.report_save_path, f"{case_no}_{timestamp}.{ext}")
+            with open(file_path, 'wb') as f:
+                f.write(report_bytes)
+            self.logger.info(f"报告已保存: {file_path}")
+        except Exception as e:
+            self.logger.error(f"保存报告失败: {e}")
+
+    def run_sync_cycle(self):
+        self.logger.info("=== 开始同步周期 ===")
+        
+        try:
+            self.sync_patients_to_hrv()
+            time.sleep(2)
+            self.fetch_and_save_hrv_results()
+            self.logger.info("=== 同步周期完成 ===")
+        except Exception as e:
+            self.logger.error(f"同步周期异常: {e}")
 
     def run_continuous(self):
-        self.logger.info("中间件服务已启动，持续同步中...")
+        self.logger.info("HRV中间件服务已启动，持续同步中...")
         try:
             while True:
-                self.sync_data('exams')
-                self.sync_data('patients')
+                self.run_sync_cycle()
                 time.sleep(self.interval)
         except KeyboardInterrupt:
-            self.logger.info("中间件服务已停止")
+            self.logger.info("HRV中间件服务已停止")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,6 @@
 {
   "his": {
     "use_database": true,
-    "api_url": "http://his-system-url/api",
-    "api_key": "your-his-api-key",
-    "timeout": 30,
     "database": {
       "server": "your-server-name\\instance-name",
       "database": "your-database-name",
@@ -12,15 +9,21 @@
       "driver": "ODBC Driver 17 for SQL Server"
     }
   },
-  "pax": {
-    "api_url": "http://pax-system-url/api",
-    "api_key": "your-pax-api-key",
+  "hrv": {
+    "base_url": "http://HRV一体机IP:8080",
+    "auth_mode": "password",
+    "username": "your-username",
+    "password": "your-password",
+    "client_id": "",
+    "client_secret": "",
     "timeout": 30
   },
   "sync": {
     "interval_seconds": 60,
     "max_retries": 3,
-    "retry_delay": 5
+    "retry_delay": 5,
+    "report_save_path": "./reports",
+    "report_format": "PDF"
   },
   "logging": {
     "level": "INFO",
