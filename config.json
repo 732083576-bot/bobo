@@ -1,0 +1,21 @@
+{
+  "his": {
+    "api_url": "http://his-system-url/api",
+    "api_key": "your-his-api-key",
+    "timeout": 30
+  },
+  "pax": {
+    "api_url": "http://pax-system-url/api",
+    "api_key": "your-pax-api-key",
+    "timeout": 30
+  },
+  "sync": {
+    "interval_seconds": 60,
+    "max_retries": 3,
+    "retry_delay": 5
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "app.log"
+  }
+}
