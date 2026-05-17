@@ -1,8 +1,16 @@
 {
   "his": {
+    "use_database": true,
     "api_url": "http://his-system-url/api",
     "api_key": "your-his-api-key",
-    "timeout": 30
+    "timeout": 30,
+    "database": {
+      "server": "your-server-name\\instance-name",
+      "database": "your-database-name",
+      "username": "your-username",
+      "password": "your-password",
+      "driver": "ODBC Driver 17 for SQL Server"
+    }
   },
   "pax": {
     "api_url": "http://pax-system-url/api",

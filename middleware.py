@@ -74,10 +74,18 @@ class Middleware:
         items = data.get('items', [data]) if isinstance(data, dict) else data
         
         all_success = True
+        table_map = {
+            'patients': 'Patients',
+            'exams': 'Exams'
+        }
+        table_name = table_map.get(data_type, data_type)
+        
         for item in items:
             result = self._retry_on_failure(self.pax_client.send_data, item, data_type)
             if result:
                 self.logger.info(f"成功发送数据到 PAX: {result}")
+                if self.his_client.use_database and 'ID' in item:
+                    self.his_client.mark_as_synced(table_name, item['ID'])
             else:
                 self.logger.error(f"发送数据到 PAX 失败: {item}")
                 all_success = False
